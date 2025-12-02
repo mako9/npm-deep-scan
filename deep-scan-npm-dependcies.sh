@@ -11,42 +11,18 @@ fi
 
 echo "📁 Scanning project: $PROJECT_PATH"
 
-# Excel file stays next to the script
-XLSX="affected-packages.xlsx"
+# --- IoC definitions ---
+# This file should be a plain text list of package names, one per line.
+IOC_FILE="affected-packages.txt"
 REPORT="deep-scan-report.json"
 
-if [ ! -f "$XLSX" ]; then
-  echo "❌ $XLSX not found in script directory."
+if [ ! -f "$IOC_FILE" ]; then
+  echo "❌ $IOC_FILE not found in script directory."
+  echo "   Please create it and add one package name per line."
   exit 1
 fi
 
-echo "📘 Extracting IoC list from $XLSX ..."
-
-TMPDIR=$(mktemp -d 2>/dev/null || mktemp -d -t tmpdir)
-
-# Extract XML
-unzip -p "$XLSX" xl/sharedStrings.xml > "$TMPDIR/sharedStrings.xml" 2>/dev/null || true
-unzip -p "$XLSX" xl/worksheets/sheet1.xml > "$TMPDIR/sheet1.xml"
-
-# Shared strings
-grep "<t>" "$TMPDIR/sharedStrings.xml" 2>/dev/null \
-  | sed -E 's/.*<t[^>]*>([^<]+)<\/t>.*/\1/' \
-  > "$TMPDIR/shared_strings.txt"
-
-# Sheet indices
-grep -o 't="s"[^>]*><v>[0-9]\+' "$TMPDIR/sheet1.xml" \
-  | sed -E 's/.*<v>//' \
-  > "$TMPDIR/indices.txt"
-
-# Resolve IoC names
-IOC_FILE="$TMPDIR/ioc_list.txt"
-: > "$IOC_FILE"
-
-while IFS= read -r idx; do
-  line=$(sed -n "$((idx + 1))p" "$TMPDIR/shared_strings.txt" || true)
-  [ -n "$line" ] && echo "$line" >> "$IOC_FILE"
-done < "$TMPDIR/indices.txt"
-
+echo "📘 Loading IoC list from $IOC_FILE ..."
 TOTAL_IOC=$(wc -l < "$IOC_FILE" | tr -d ' ')
 echo "✔ Loaded $TOTAL_IOC IoCs."
 
@@ -82,6 +58,7 @@ echo "📦 Scanning node_modules ..."
 NODE_HITS=""
 if [ -d "$PROJECT_PATH/node_modules" ]; then
   while IFS= read -r pkg; do
+    # Check if a directory with the package name exists
     if [ -d "$PROJECT_PATH/node_modules/$pkg" ]; then
       NODE_HITS="$NODE_HITS $pkg"
     fi
@@ -97,6 +74,8 @@ echo "🔐 Scanning package-lock.json ..."
 LOCK_HITS=""
 if [ -f "$PROJECT_PATH/package-lock.json" ]; then
   while IFS= read -r pkg; do
+    # Grep for the package name as a key, e.g., "pkgname":
+    # Using -q for quiet mode (faster, stops on first match)
     if grep -q "\"$pkg\"" "$PROJECT_PATH/package-lock.json"; then
       LOCK_HITS="$LOCK_HITS $pkg"
     fi
@@ -112,7 +91,8 @@ echo "🧵 Scanning yarn.lock ..."
 YARN_HITS=""
 if [ -f "$PROJECT_PATH/yarn.lock" ]; then
   while IFS= read -r pkg; do
-    if grep -q "$pkg" "$PROJECT_PATH/yarn.lock"; then
+    # Grep for the package name. Add "@" for better accuracy in yarn.lock
+    if grep -q "$pkg@" "$PROJECT_PATH/yarn.lock"; then
       YARN_HITS="$YARN_HITS $pkg"
     fi
   done < "$IOC_FILE"
@@ -127,7 +107,8 @@ echo "📦 Scanning pnpm-lock.yaml ..."
 PNPM_HITS=""
 if [ -f "$PROJECT_PATH/pnpm-lock.yaml" ]; then
   while IFS= read -r pkg; do
-    if grep -q "$pkg" "$PROJECT_PATH/pnpm-lock.yaml"; then
+    # Grep for the package name followed by a colon
+    if grep -q "$pkg:" "$PROJECT_PATH/pnpm-lock.yaml"; then
       PNPM_HITS="$PNPM_HITS $pkg"
     fi
   done < "$IOC_FILE"
@@ -141,7 +122,12 @@ echo "🌳 Running npm ls scans (may take a while) ..."
 
 LS_HITS=""
 while IFS= read -r pkg; do
+  # Run npm ls for the specific package
+  # We pipe to /dev/null to silence the command's output
+  # The command will exit with 0 if found, 1 if not
   if (cd "$PROJECT_PATH" && npm ls "$pkg" --all >/dev/null 2>&1); then
+    # Double-check... npm ls can be tricky.
+    # We run it again, this time checking the output contains the package name
     if (cd "$PROJECT_PATH" && npm ls "$pkg" --all 2>/dev/null | grep -q "$pkg"); then
       LS_HITS="$LS_HITS $pkg"
     fi
@@ -159,10 +145,6 @@ done < "$IOC_FILE"
   echo "  }"
   echo "}"
 } >> "$REPORT"
-
-
-# Cleanup
-rm -rf "$TMPDIR"
 
 echo "✅ Scan complete."
 echo "📄 Report saved to $REPORT"
